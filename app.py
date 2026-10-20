@@ -55,16 +55,22 @@ DEFAULT_WEIGHTS = {
 team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 
 # ==========================================
-# NORMALIZACJA NAZW DRUŻYN Z API
+# NORMALIZACJA I REJESTRACJA NOWYCH DRUŻYN
 # ==========================================
 def normalize_team_name(name):
-    """Dopasowuje nazwy z API do kluczy w naszym słowniku wag."""
     mapping = {
         "Paris Saint Germain": "Paris Saint-Germain",
         "Bayern Munich": "FC Bayern München",
         "Barcelona": "FC Barcelona"
     }
-    return mapping.get(name, name)
+    norm_name = mapping.get(name, name)
+    
+    # Jeśli drużyny nie ma w słowniku wag, dodaj ją automatycznie z domyślnymi wartościami
+    if norm_name not in team_weights:
+        team_weights[norm_name] = {"attack": 1.0, "defense": 1.0}
+        save_json_file(WEIGHTS_FILE, team_weights)
+        
+    return norm_name
 
 # ==========================================
 # API: POBIERANIE KURSÓW ORAZ WYNIKÓW
@@ -213,7 +219,7 @@ fetch_and_apply_automatic_results(ODDS_API_KEY)
 # ==========================================
 # INTERFEJS UŻYTKOWNIKA STREAMLIT
 # ==========================================
-st.title("⚽ UCL Match Predictor & Value Betting Engine")
+st.title("⚽ UCL Match Predictor & Value Betting Hub")
 tab1, tab2, tab3 = st.tabs(["📅 Terminarz & Typy", "📊 Tabela & Statystyki Wag", "📝 Rejestr Zakładów & ROI"])
 
 with tab1:
@@ -265,7 +271,7 @@ with tab1:
 
 with tab2:
     st.header("Aktualna Siła Drużyn (Wagi)")
-    st.info("ℹ️ Wagi ataku i obrony są aktualizowane automatycznie w tle na podstawie zakończonych meczów z API.")
+    st.info("ℹ️ Wagi ataku i obrony aktualizują się automatycznie w tle. Nowe drużyny z terminarza dopisują się do tabeli samoczynnie.")
     
     df_w = pd.DataFrame.from_dict(team_weights, orient='index').reset_index()
     df_w.columns = ["Drużyna", "Współczynnik Ataku", "Współczynnik Obrony (niżej = lepiej)"]
@@ -281,4 +287,4 @@ with tab3:
         settled = df_b[df_b['status'] != "PENDING"]
         st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
         st.dataframe(df_b, use_container_width=True)
-        
+                
