@@ -21,6 +21,39 @@ BETS_FILE = "bets_history.json"
 PROCESSED_MATCHES_FILE = "processed_matches.json"
 
 # ==========================================
+# BAZOWE WAGI NA PODSTAWIE UEFA & CLUB ELO
+# ==========================================
+DEFAULT_WEIGHTS = {
+    "Real Madrid": {"attack": 1.35, "defense": 0.80},
+    "Manchester City": {"attack": 1.40, "defense": 0.75},
+    "FC Bayern München": {"attack": 1.30, "defense": 0.85},
+    "FC Barcelona": {"attack": 1.25, "defense": 0.90},
+    "Paris Saint-Germain": {"attack": 1.20, "defense": 0.90},
+    "Inter": {"attack": 1.15, "defense": 0.80},
+    "Arsenal": {"attack": 1.25, "defense": 0.80},
+    "Liverpool": {"attack": 1.35, "defense": 0.85},
+    "Borussia Dortmund": {"attack": 1.10, "defense": 1.00},
+    "Napoli": {"attack": 1.15, "defense": 0.90},
+    "Villarreal": {"attack": 1.05, "defense": 1.00},
+    "FC Porto": {"attack": 1.05, "defense": 0.95},
+    "PSV Eindhoven": {"attack": 1.10, "defense": 1.05},
+    "Slavia Praha": {"attack": 0.95, "defense": 1.05},
+    "Fenerbahce": {"attack": 1.05, "defense": 1.10},
+    "Bodø/Glimt": {"attack": 0.90, "defense": 1.15},
+    "Sabah FK": {"attack": 0.75, "defense": 1.30},
+    "Leverkusen": {"attack": 1.20, "defense": 0.85},
+    "Atalanta": {"attack": 1.15, "defense": 1.00},
+    "AC Milan": {"attack": 1.10, "defense": 0.95},
+    "Atletico Madrid": {"attack": 1.05, "defense": 0.80},
+    "Juventus": {"attack": 1.00, "defense": 0.85},
+    "Benfica": {"attack": 1.05, "defense": 0.95},
+    "Sporting CP": {"attack": 1.10, "defense": 0.95},
+    "Club Brugge": {"attack": 0.95, "defense": 1.10},
+    "Celtic": {"attack": 0.90, "defense": 1.15},
+    "Feyenoord": {"attack": 1.00, "defense": 1.05}
+}
+
+# ==========================================
 # POMOCNICZE: PLIKI JSON I KALKULATOR EV
 # ==========================================
 def load_json_file(filepath, default_data):
@@ -41,31 +74,31 @@ def calculate_ev(prob, odds):
         return 0.0
     return (prob * odds - 1) * 100
 
-DEFAULT_WEIGHTS = {
-    "Real Madrid": {"attack": 1.35, "defense": 0.80},
-    "Manchester City": {"attack": 1.40, "defense": 0.75},
-    "FC Bayern München": {"attack": 1.30, "defense": 0.85},
-    "FC Barcelona": {"attack": 1.25, "defense": 0.90},
-    "Paris Saint-Germain": {"attack": 1.20, "defense": 0.90},
-    "Inter": {"attack": 1.15, "defense": 0.80},
-    "Arsenal": {"attack": 1.25, "defense": 0.80},
-    "Borussia Dortmund": {"attack": 1.10, "defense": 1.00}
-}
-
 team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 
+# Uzupełnij ewentualne brakujące kluby w team_weights z DEFAULT_WEIGHTS
+for t_name, t_vals in DEFAULT_WEIGHTS.items():
+    if t_name not in team_weights:
+        team_weights[t_name] = t_vals
+save_json_file(WEIGHTS_FILE, team_weights)
+
 # ==========================================
-# NORMALIZACJA I REJESTRACJA NOWYCH DRUŻYN
+# NORMALIZACJA NAZW DRUŻYN Z API
 # ==========================================
 def normalize_team_name(name):
     mapping = {
         "Paris Saint Germain": "Paris Saint-Germain",
         "Bayern Munich": "FC Bayern München",
-        "Barcelona": "FC Barcelona"
+        "Barcelona": "FC Barcelona",
+        "Porto": "FC Porto",
+        "Fenerbahçe": "Fenerbahce",
+        "Slavia Prague": "Slavia Praha",
+        "Bodo/Glimt": "Bodø/Glimt",
+        "Bayer Leverkusen": "Leverkusen",
+        "Atlético Madrid": "Atletico Madrid"
     }
     norm_name = mapping.get(name, name)
     
-    # Jeśli drużyny nie ma w słowniku wag, dodaj ją automatycznie z domyślnymi wartościami
     if norm_name not in team_weights:
         team_weights[norm_name] = {"attack": 1.0, "defense": 1.0}
         save_json_file(WEIGHTS_FILE, team_weights)
@@ -287,4 +320,4 @@ with tab3:
         settled = df_b[df_b['status'] != "PENDING"]
         st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
         st.dataframe(df_b, use_container_width=True)
-                
+        
