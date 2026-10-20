@@ -15,7 +15,8 @@ st.set_page_config(
     layout="wide"
 )
 
-ODDS_API_KEY = st.secrets.get("THE_ODDS_API_KEY", "TWOJ_KLUCZ_API")
+# Wprowadzony Twój klucz API
+ODDS_API_KEY = st.secrets.get("THE_ODDS_API_KEY", "99f7bfd9a3977d8d7cf04dba05b03a89")
 WEIGHTS_FILE = "team_weights.json"
 BETS_FILE = "bets_history.json"
 PROCESSED_MATCHES_FILE = "processed_matches.json"
@@ -55,13 +56,10 @@ DEFAULT_WEIGHTS = {
 team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 
 # ==========================================
-# API: POBIERANIE KURSÓW ORAZ WYNIKÓW (AUTOMATYZACJA)
+# API: POBIERANIE KURSÓW ORAZ WYNIKÓW
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_ucl_odds(api_key):
-    if not api_key or api_key == "TWOJ_KLUCZ_API":
-        return get_mock_matches()
-
     url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/odds/"
     params = {'apiKey': api_key, 'regions': 'eu', 'markets': 'h2h', 'dateFormat': 'iso'}
 
@@ -96,15 +94,12 @@ def fetch_ucl_odds(api_key):
                 })
             return matches
         else:
+            st.warning(f"API zwróciło kod {response.status_code}. Używam danych zapasowych.")
             return get_mock_matches()
     except Exception:
         return get_mock_matches()
 
 def fetch_and_apply_automatic_results(api_key):
-    """Automatycznie pobiera wyniki zakończonych meczów i koryguje wagi w tle."""
-    if not api_key or api_key == "TWOJ_KLUCZ_API":
-        return  # W trybie mock pomijamy automatyczne uczenie sieciowe
-
     url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/scores/"
     params = {'apiKey': api_key, 'daysFrom': 3}
 
@@ -125,7 +120,6 @@ def fetch_and_apply_automatic_results(api_key):
                         home_goals = int(next((s['score'] for s in scores if s['name'] == home_team), 0))
                         away_goals = int(next((s['score'] for s in scores if s['name'] == away_team), 0))
 
-                        # Uruchomienie uczenia resztkowego
                         update_team_weights_residual_auto(home_team, away_team, home_goals, away_goals)
                         processed_ids.append(match.get('id'))
                         updated = True
@@ -210,7 +204,6 @@ def update_team_weights_residual_auto(home_team, away_team, actual_home_goals, a
 
     save_json_file(WEIGHTS_FILE, team_weights)
 
-# Uruchomienie automatycznego sprawdzenia wyników w tle przy starcie aplikacji
 fetch_and_apply_automatic_results(ODDS_API_KEY)
 
 # ==========================================
@@ -223,49 +216,52 @@ with tab1:
     st.header("Najbliższe Mecze i Wycena Kursów")
     matches = fetch_ucl_odds(ODDS_API_KEY)
 
-    for match in matches:
-        with st.expander(f"⚔️ {match['home_team']} vs {match['away_team']} — {match['commence_time'][:10]}", expanded=True):
-            pred = predict_match(match['home_team'], match['away_team'])
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.markdown("**Prognoza goli (xG):**")
-                st.write(f"🏠 {match['home_team']}: **{pred['exp_home_goals']}**")
-                st.write(f"🚀 {match['away_team']}: **{pred['exp_away_goals']}**")
+    if not matches:
+        st.info("Obecnie brak nadchodzących meczów Ligi Mistrzów w ofercie bukmacherów.")
+    else:
+        for match in matches:
+            with st.expander(f"⚔️ {match['home_team']} vs {match['away_team']} — {match['commence_time'][:10]}", expanded=True):
+                pred = predict_match(match['home_team'], match['away_team'])
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown("**Prognoza goli (xG):**")
+                    st.write(f"🏠 {match['home_team']}: **{pred['exp_home_goals']}**")
+                    st.write(f"🚀 {match['away_team']}: **{pred['exp_away_goals']}**")
 
-            with col2:
-                st.markdown("**Prawdopodobieństwo Modelu:**")
-                st.write(f"1: **{pred['prob_home']*100:.1f}%** (Fair: **{pred['fair_odds_home']}**)")
-                st.write(f"X: **{pred['prob_draw']*100:.1f}%** (Fair: **{pred['fair_odds_draw']}**)")
-                st.write(f"2: **{pred['prob_away']*100:.1f}%** (Fair: **{pred['fair_odds_away']}**)")
+                with col2:
+                    st.markdown("**Prawdopodobieństwo Modelu:**")
+                    st.write(f"1: **{pred['prob_home']*100:.1f}%** (Fair: **{pred['fair_odds_home']}**)")
+                    st.write(f"X: **{pred['prob_draw']*100:.1f}%** (Fair: **{pred['fair_odds_draw']}**)")
+                    st.write(f"2: **{pred['prob_away']*100:.1f}%** (Fair: **{pred['fair_odds_away']}**)")
 
-            with col3:
-                st.markdown("**Wartość (EV):**")
-                o_h, o_d, o_a = match['odds'].get('1'), match['odds'].get('X'), match['odds'].get('2')
-                ev_h, ev_d, ev_a = calculate_ev(pred['prob_home'], o_h), calculate_ev(pred['prob_draw'], o_d), calculate_ev(pred['prob_away'], o_a)
-                st.write(f"1: {o_h or '-'} | EV: **{ev_h:+.1f}%** {'🔥' if ev_h > 5 else ''}")
-                st.write(f"X: {o_d or '-'} | EV: **{ev_d:+.1f}%** {'🔥' if ev_d > 5 else ''}")
-                st.write(f"2: {o_a or '-'} | EV: **{ev_a:+.1f}%** {'🔥' if ev_a > 5 else ''}")
+                with col3:
+                    st.markdown("**Wartość (EV):**")
+                    o_h, o_d, o_a = match['odds'].get('1'), match['odds'].get('X'), match['odds'].get('2')
+                    ev_h, ev_d, ev_a = calculate_ev(pred['prob_home'], o_h), calculate_ev(pred['prob_draw'], o_d), calculate_ev(pred['prob_away'], o_a)
+                    st.write(f"1: {o_h or '-'} | EV: **{ev_h:+.1f}%** {'🔥' if ev_h > 5 else ''}")
+                    st.write(f"X: {o_d or '-'} | EV: **{ev_d:+.1f}%** {'🔥' if ev_d > 5 else ''}")
+                    st.write(f"2: {o_a or '-'} | EV: **{ev_a:+.1f}%** {'🔥' if ev_a > 5 else ''}")
 
-            st.divider()
-            c1, c2, c3, _ = st.columns([2, 2, 2, 2])
-            pick = c1.selectbox("Typuj:", ["1", "X", "2"], key=f"pick_{match['id']}")
-            stake = c2.number_input("Stawka (PLN):", min_value=10, max_value=1000, value=100, key=f"stake_{match['id']}")
-            odds_val = o_h if pick == "1" else (o_d if pick == "X" else o_a)
-            
-            if c3.button("➕ Dodaj do Rejestru", key=f"add_{match['id']}"):
-                history = load_json_file(BETS_FILE, [])
-                history.append({
-                    "match": f"{match['home_team']} vs {match['away_team']}",
-                    "pick": pick, "odds": odds_val or 2.0, "stake": stake,
-                    "status": "PENDING", "profit": 0.0
-                })
-                save_json_file(BETS_FILE, history)
-                st.success("Dodano zakład!")
+                st.divider()
+                c1, c2, c3, _ = st.columns([2, 2, 2, 2])
+                pick = c1.selectbox("Typuj:", ["1", "X", "2"], key=f"pick_{match['id']}")
+                stake = c2.number_input("Stawka (PLN):", min_value=10, max_value=1000, value=100, key=f"stake_{match['id']}")
+                odds_val = o_h if pick == "1" else (o_d if pick == "X" else o_a)
+                
+                if c3.button("➕ Dodaj do Rejestru", key=f"add_{match['id']}"):
+                    history = load_json_file(BETS_FILE, [])
+                    history.append({
+                        "match": f"{match['home_team']} vs {match['away_team']}",
+                        "pick": pick, "odds": odds_val or 2.0, "stake": stake,
+                        "status": "PENDING", "profit": 0.0
+                    })
+                    save_json_file(BETS_FILE, history)
+                    st.success("Dodano zakład!")
 
 with tab2:
     st.header("Aktualna Siła Drużyn (Wagi)")
-    st.info("ℹ️ Wagi ataku i obrony są aktualizowane **automatycznie w tle** na podstawie zakończonych meczów pobieranych z API.")
+    st.info("ℹ️ Wagi ataku i obrony są aktualizowane automatycznie w tle na podstawie zakończonych meczów z API.")
     
     df_w = pd.DataFrame.from_dict(team_weights, orient='index').reset_index()
     df_w.columns = ["Drużyna", "Współczynnik Ataku", "Współczynnik Obrony (niżej = lepiej)"]
@@ -281,4 +277,4 @@ with tab3:
         settled = df_b[df_b['status'] != "PENDING"]
         st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
         st.dataframe(df_b, use_container_width=True)
-                
+                        
