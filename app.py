@@ -15,7 +15,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Wprowadzony Twój klucz API
 ODDS_API_KEY = st.secrets.get("THE_ODDS_API_KEY", "99f7bfd9a3977d8d7cf04dba05b03a89")
 WEIGHTS_FILE = "team_weights.json"
 BETS_FILE = "bets_history.json"
@@ -56,6 +55,18 @@ DEFAULT_WEIGHTS = {
 team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 
 # ==========================================
+# NORMALIZACJA NAZW DRUŻYN Z API
+# ==========================================
+def normalize_team_name(name):
+    """Dopasowuje nazwy z API do kluczy w naszym słowniku wag."""
+    mapping = {
+        "Paris Saint Germain": "Paris Saint-Germain",
+        "Bayern Munich": "FC Bayern München",
+        "Barcelona": "FC Barcelona"
+    }
+    return mapping.get(name, name)
+
+# ==========================================
 # API: POBIERANIE KURSÓW ORAZ WYNIKÓW
 # ==========================================
 @st.cache_data(ttl=3600)
@@ -69,8 +80,8 @@ def fetch_ucl_odds(api_key):
             data = response.json()
             matches = []
             for match in data:
-                home_team = match.get('home_team')
-                away_team = match.get('away_team')
+                home_team = normalize_team_name(match.get('home_team'))
+                away_team = normalize_team_name(match.get('away_team'))
                 bookmakers = match.get('bookmakers', [])
                 odds = {'1': None, 'X': None, '2': None}
                 
@@ -78,9 +89,10 @@ def fetch_ucl_odds(api_key):
                     h2h_market = next((m for m in bookmakers[0]['markets'] if m['key'] == 'h2h'), None)
                     if h2h_market:
                         for outcome in h2h_market['outcomes']:
-                            if outcome['name'] == home_team:
+                            o_name = normalize_team_name(outcome['name'])
+                            if o_name == home_team:
                                 odds['1'] = outcome['price']
-                            elif outcome['name'] == away_team:
+                            elif o_name == away_team:
                                 odds['2'] = outcome['price']
                             elif outcome['name'] == 'Draw':
                                 odds['X'] = outcome['price']
@@ -94,7 +106,6 @@ def fetch_ucl_odds(api_key):
                 })
             return matches
         else:
-            st.warning(f"API zwróciło kod {response.status_code}. Używam danych zapasowych.")
             return get_mock_matches()
     except Exception:
         return get_mock_matches()
@@ -112,13 +123,13 @@ def fetch_and_apply_automatic_results(api_key):
 
             for match in data:
                 if match.get('completed', False) and match.get('id') not in processed_ids:
-                    home_team = match.get('home_team')
-                    away_team = match.get('away_team')
+                    home_team = normalize_team_name(match.get('home_team'))
+                    away_team = normalize_team_name(match.get('away_team'))
                     scores = match.get('scores', [])
                     
                     if scores and len(scores) == 2:
-                        home_goals = int(next((s['score'] for s in scores if s['name'] == home_team), 0))
-                        away_goals = int(next((s['score'] for s in scores if s['name'] == away_team), 0))
+                        home_goals = int(next((s['score'] for s in scores if normalize_team_name(s['name']) == home_team), 0))
+                        away_goals = int(next((s['score'] for s in scores if normalize_team_name(s['name']) == away_team), 0))
 
                         update_team_weights_residual_auto(home_team, away_team, home_goals, away_goals)
                         processed_ids.append(match.get('id'))
@@ -137,13 +148,6 @@ def get_mock_matches():
             "away_team": "Manchester City",
             "commence_time": "2026-11-26T20:00:00Z",
             "odds": {"1": 2.40, "X": 3.50, "2": 2.80}
-        },
-        {
-            "id": "mock_2",
-            "home_team": "FC Bayern München",
-            "away_team": "FC Barcelona",
-            "commence_time": "2026-11-27T20:00:00Z",
-            "odds": {"1": 2.10, "X": 3.70, "2": 3.20}
         }
     ]
 
@@ -277,4 +281,4 @@ with tab3:
         settled = df_b[df_b['status'] != "PENDING"]
         st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
         st.dataframe(df_b, use_container_width=True)
-                        
+        
