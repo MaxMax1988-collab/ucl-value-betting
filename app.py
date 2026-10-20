@@ -1,23 +1,171 @@
 import streamlit as st
 import pandas as pd
-from src.utils import load_json_file, save_json_file, calculate_ev
-from src.api import fetch_ucl_odds
-from src.model import predict_match, update_team_weights_residual
+import numpy as np
+import requests
+import json
+import os
+from scipy.stats import poisson
 
-st.set_page_config(page_title="UCL Predictor & Value Betting Hub", page_icon="⚽", layout="wide")
+st.set_page_config(
+    page_title="UCL Predictor & Value Betting Hub",
+    page_icon="⚽",
+    layout="wide"
+)
 
 ODDS_API_KEY = st.secrets.get("THE_ODDS_API_KEY", "TWOJ_KLUCZ_API")
-WEIGHTS_FILE = "data/team_weights.json"
-BETS_FILE = "data/bets_history.json"
+WEIGHTS_FILE = "team_weights.json"
+BETS_FILE = "bets_history.json"
+
+def load_json_file(filepath, default_data):
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default_data
+    return default_data
+
+def save_json_file(filepath, data):
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+def calculate_ev(prob, odds):
+    if not odds or odds <= 1.0:
+        return 0.0
+    return (prob * odds - 1) * 100
 
 DEFAULT_WEIGHTS = {
     "Real Madrid": {"attack": 1.35, "defense": 0.80},
     "Manchester City": {"attack": 1.40, "defense": 0.75},
     "FC Bayern München": {"attack": 1.30, "defense": 0.85},
-    "FC Barcelona": {"attack": 1.25, "defense": 0.90}
+    "FC Barcelona": {"attack": 1.25, "defense": 0.90},
+    "Paris Saint-Germain": {"attack": 1.20, "defense": 0.90},
+    "Inter": {"attack": 1.15, "defense": 0.80},
+    "Arsenal": {"attack": 1.25, "defense": 0.80},
+    "Borussia Dortmund": {"attack": 1.10, "defense": 1.00}
 }
 
 team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
+
+def fetch_ucl_odds(api_key):
+    if not api_key or api_key == "TWOJ_KLUCZ_API":
+        return get_mock_matches()
+
+    url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/odds/"
+    params = {
+        'apiKey': api_key,
+        'regions': 'eu',
+        'markets': 'h2h',
+        'dateFormat': 'iso'
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            matches = []
+            for match in data:
+                home_team = match.get('home_team')
+                away_team = match.get('away_team')
+                bookmakers = match.get('bookmakers', [])
+                odds = {'1': None, 'X': None, '2': None}
+                
+                if bookmakers:
+                    h2h_market = next((m for m in bookmakers[0]['markets'] if m['key'] == 'h2h'), None)
+                    if h2h_market:
+                        for outcome in h2h_market['outcomes']:
+                            if outcome['name'] == home_team:
+                                odds['1'] = outcome['price']
+                            elif outcome['name'] == away_team:
+                                odds['2'] = outcome['price']
+                            elif outcome['name'] == 'Draw':
+                                odds['X'] = outcome['price']
+
+                matches.append({
+                    "id": match.get('id'),
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "commence_time": match.get('commence_time'),
+                    "odds": odds
+                })
+            return matches
+        else:
+            return get_mock_matches()
+    except Exception:
+        return get_mock_matches()
+
+def get_mock_matches():
+    return [
+        {
+            "id": "mock_1",
+            "home_team": "Real Madrid",
+            "away_team": "Manchester City",
+            "commence_time": "2026-11-26T20:00:00Z",
+            "odds": {"1": 2.40, "X": 3.50, "2": 2.80}
+        },
+        {
+            "id": "mock_2",
+            "home_team": "FC Bayern München",
+            "away_team": "FC Barcelona",
+            "commence_time": "2026-11-27T20:00:00Z",
+            "odds": {"1": 2.10, "X": 3.70, "2": 3.20}
+        }
+    ]
+
+def predict_match(home_team, away_team, home_advantage=1.15, league_avg_goals=1.5):
+    home_w = team_weights.get(home_team, {"attack": 1.0, "defense": 1.0})
+    away_w = team_weights.get(away_team, {"attack": 1.0, "defense": 1.0})
+
+    exp_home_goals = max(0.2, league_avg_goals * home_w["attack"] * away_w["defense"] * home_advantage)
+    exp_away_goals = max(0.2, league_avg_goals * away_w["attack"] * home_w["defense"])
+
+    max_goals = 8
+    match_matrix = np.zeros((max_goals, max_goals))
+
+    for h in range(max_goals):
+        for a in range(max_goals):
+            match_matrix[h, a] = poisson.pmf(h, exp_home_goals) * poisson.pmf(a, exp_away_goals)
+
+    prob_home = np.sum(np.tril(match_matrix, -1))
+    prob_draw = np.sum(np.diag(match_matrix))
+    prob_away = np.sum(np.triu(match_matrix, 1))
+
+    total_prob = prob_home + prob_draw + prob_away
+    if total_prob > 0:
+        prob_home /= total_prob
+        prob_draw /= total_prob
+        prob_away /= total_prob
+
+    return {
+        "exp_home_goals": round(exp_home_goals, 2),
+        "exp_away_goals": round(exp_away_goals, 2),
+        "prob_home": prob_home,
+        "prob_draw": prob_draw,
+        "prob_away": prob_away,
+        "fair_odds_home": round(1 / prob_home, 2) if prob_home > 0 else 99,
+        "fair_odds_draw": round(1 / prob_draw, 2) if prob_draw > 0 else 99,
+        "fair_odds_away": round(1 / prob_away, 2) if prob_away > 0 else 99,
+    }
+
+def update_team_weights_residual(home_team, away_team, actual_home_goals, actual_away_goals, learning_rate=0.05):
+    pred = predict_match(home_team, away_team)
+    
+    err_home = actual_home_goals - pred["exp_home_goals"]
+    err_away = actual_away_goals - pred["exp_away_goals"]
+
+    if home_team not in team_weights:
+        team_weights[home_team] = {"attack": 1.0, "defense": 1.0}
+    if away_team not in team_weights:
+        team_weights[away_team] = {"attack": 1.0, "defense": 1.0}
+
+    team_weights[home_team]["attack"] = round(np.clip(team_weights[home_team]["attack"] + learning_rate * err_home, 0.5, 2.5), 3)
+    team_weights[away_team]["defense"] = round(np.clip(team_weights[away_team]["defense"] + learning_rate * err_home, 0.5, 2.5), 3)
+
+    team_weights[away_team]["attack"] = round(np.clip(team_weights[away_team]["attack"] + learning_rate * err_away, 0.5, 2.5), 3)
+    team_weights[home_team]["defense"] = round(np.clip(team_weights[home_team]["defense"] + learning_rate * err_away, 0.5, 2.5), 3)
+
+    save_json_file(WEIGHTS_FILE, team_weights)
+    return err_home, err_away
 
 st.title("⚽ UCL Match Predictor & Value Betting Engine")
 tab1, tab2, tab3 = st.tabs(["📅 Terminarz & Typy", "📊 Tabela & Statystyki", "📝 Rejestr & ROI"])
@@ -28,7 +176,7 @@ with tab1:
 
     for match in matches:
         with st.expander(f"⚔️ {match['home_team']} vs {match['away_team']} — {match['commence_time'][:10]}", expanded=True):
-            pred = predict_match(match['home_team'], match['away_team'], team_weights)
+            pred = predict_match(match['home_team'], match['away_team'])
             
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -56,7 +204,7 @@ with tab1:
             stake = c2.number_input("Stawka (PLN):", min_value=10, max_value=1000, value=100, key=f"stake_{match['id']}")
             odds_val = o_h if pick == "1" else (o_d if pick == "X" else o_a)
             
-            if c3.button("➕ Dodaj do Rejestru", key=f"add_{match['id']}"):
+            if c3.button("➕ Dodaj do Rejestru", key=f"add_{match['id']}" ):
                 history = load_json_file(BETS_FILE, [])
                 history.append({
                     "match": f"{match['home_team']} vs {match['away_team']}",
@@ -80,8 +228,7 @@ with tab2:
     r_ga = col_ga.number_input("Gole Wyjazd", 0, 10, 1, key="rga")
 
     if st.button("🔄 Aktualizuj Wagi"):
-        updated_w, eh, ea = update_team_weights_residual(sim_h, sim_a, r_gh, r_ga, team_weights)
-        save_json_file(WEIGHTS_FILE, updated_w)
+        eh, ea = update_team_weights_residual(sim_h, sim_a, r_gh, r_ga)
         st.success(f"Zaktualizowano wagi! Błąd resztkowy: {eh:+.2f} / {ea:+.2f}")
         st.rerun()
 
@@ -95,4 +242,4 @@ with tab3:
         settled = df_b[df_b['status'] != "PENDING"]
         st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
         st.dataframe(df_b, use_container_width=True)
-          
+        
