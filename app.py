@@ -6,6 +6,9 @@ import json
 import os
 from scipy.stats import poisson
 
+# ==========================================
+# KONFIGURACJA STRONY
+# ==========================================
 st.set_page_config(
     page_title="UCL Predictor & Value Betting Hub",
     page_icon="⚽",
@@ -15,7 +18,11 @@ st.set_page_config(
 ODDS_API_KEY = st.secrets.get("THE_ODDS_API_KEY", "TWOJ_KLUCZ_API")
 WEIGHTS_FILE = "team_weights.json"
 BETS_FILE = "bets_history.json"
+PROCESSED_MATCHES_FILE = "processed_matches.json"
 
+# ==========================================
+# POMOCNICZE: PLIKI JSON I KALKULATOR EV
+# ==========================================
 def load_json_file(filepath, default_data):
     if os.path.exists(filepath):
         try:
@@ -47,17 +54,16 @@ DEFAULT_WEIGHTS = {
 
 team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 
+# ==========================================
+# API: POBIERANIE KURSÓW ORAZ WYNIKÓW (AUTOMATYZACJA)
+# ==========================================
+@st.cache_data(ttl=3600)
 def fetch_ucl_odds(api_key):
     if not api_key or api_key == "TWOJ_KLUCZ_API":
         return get_mock_matches()
 
     url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/odds/"
-    params = {
-        'apiKey': api_key,
-        'regions': 'eu',
-        'markets': 'h2h',
-        'dateFormat': 'iso'
-    }
+    params = {'apiKey': api_key, 'regions': 'eu', 'markets': 'h2h', 'dateFormat': 'iso'}
 
     try:
         response = requests.get(url, params=params, timeout=10)
@@ -94,6 +100,41 @@ def fetch_ucl_odds(api_key):
     except Exception:
         return get_mock_matches()
 
+def fetch_and_apply_automatic_results(api_key):
+    """Automatycznie pobiera wyniki zakończonych meczów i koryguje wagi w tle."""
+    if not api_key or api_key == "TWOJ_KLUCZ_API":
+        return  # W trybie mock pomijamy automatyczne uczenie sieciowe
+
+    url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/scores/"
+    params = {'apiKey': api_key, 'daysFrom': 3}
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            processed_ids = load_json_file(PROCESSED_MATCHES_FILE, [])
+            updated = False
+
+            for match in data:
+                if match.get('completed', False) and match.get('id') not in processed_ids:
+                    home_team = match.get('home_team')
+                    away_team = match.get('away_team')
+                    scores = match.get('scores', [])
+                    
+                    if scores and len(scores) == 2:
+                        home_goals = int(next((s['score'] for s in scores if s['name'] == home_team), 0))
+                        away_goals = int(next((s['score'] for s in scores if s['name'] == away_team), 0))
+
+                        # Uruchomienie uczenia resztkowego
+                        update_team_weights_residual_auto(home_team, away_team, home_goals, away_goals)
+                        processed_ids.append(match.get('id'))
+                        updated = True
+
+            if updated:
+                save_json_file(PROCESSED_MATCHES_FILE, processed_ids)
+    except Exception:
+        pass
+
 def get_mock_matches():
     return [
         {
@@ -112,6 +153,9 @@ def get_mock_matches():
         }
     ]
 
+# ==========================================
+# MODEL POISSONA I UCZENIE RESZTKOWE
+# ==========================================
 def predict_match(home_team, away_team, home_advantage=1.15, league_avg_goals=1.5):
     home_w = team_weights.get(home_team, {"attack": 1.0, "defense": 1.0})
     away_w = team_weights.get(away_team, {"attack": 1.0, "defense": 1.0})
@@ -147,7 +191,7 @@ def predict_match(home_team, away_team, home_advantage=1.15, league_avg_goals=1.
         "fair_odds_away": round(1 / prob_away, 2) if prob_away > 0 else 99,
     }
 
-def update_team_weights_residual(home_team, away_team, actual_home_goals, actual_away_goals, learning_rate=0.05):
+def update_team_weights_residual_auto(home_team, away_team, actual_home_goals, actual_away_goals, learning_rate=0.05):
     pred = predict_match(home_team, away_team)
     
     err_home = actual_home_goals - pred["exp_home_goals"]
@@ -165,10 +209,15 @@ def update_team_weights_residual(home_team, away_team, actual_home_goals, actual
     team_weights[home_team]["defense"] = round(np.clip(team_weights[home_team]["defense"] + learning_rate * err_away, 0.5, 2.5), 3)
 
     save_json_file(WEIGHTS_FILE, team_weights)
-    return err_home, err_away
 
+# Uruchomienie automatycznego sprawdzenia wyników w tle przy starcie aplikacji
+fetch_and_apply_automatic_results(ODDS_API_KEY)
+
+# ==========================================
+# INTERFEJS UŻYTKOWNIKA STREAMLIT
+# ==========================================
 st.title("⚽ UCL Match Predictor & Value Betting Engine")
-tab1, tab2, tab3 = st.tabs(["📅 Terminarz & Typy", "📊 Tabela & Statystyki", "📝 Rejestr & ROI"])
+tab1, tab2, tab3 = st.tabs(["📅 Terminarz & Typy", "📊 Tabela & Statystyki Wag", "📝 Rejestr Zakładów & ROI"])
 
 with tab1:
     st.header("Najbliższe Mecze i Wycena Kursów")
@@ -204,7 +253,7 @@ with tab1:
             stake = c2.number_input("Stawka (PLN):", min_value=10, max_value=1000, value=100, key=f"stake_{match['id']}")
             odds_val = o_h if pick == "1" else (o_d if pick == "X" else o_a)
             
-            if c3.button("➕ Dodaj do Rejestru", key=f"add_{match['id']}" ):
+            if c3.button("➕ Dodaj do Rejestru", key=f"add_{match['id']}"):
                 history = load_json_file(BETS_FILE, [])
                 history.append({
                     "match": f"{match['home_team']} vs {match['away_team']}",
@@ -215,22 +264,12 @@ with tab1:
                 st.success("Dodano zakład!")
 
 with tab2:
-    st.header("Siła Drużyn (Wagi)")
+    st.header("Aktualna Siła Drużyn (Wagi)")
+    st.info("ℹ️ Wagi ataku i obrony są aktualizowane **automatycznie w tle** na podstawie zakończonych meczów pobieranych z API.")
+    
     df_w = pd.DataFrame.from_dict(team_weights, orient='index').reset_index()
-    df_w.columns = ["Drużyna", "Atak", "Obrona"]
+    df_w.columns = ["Drużyna", "Współczynnik Ataku", "Współczynnik Obrony (niżej = lepiej)"]
     st.dataframe(df_w, use_container_width=True)
-
-    st.subheader("⚙️ Symulator Uczenia Resztkowego")
-    col_h, col_a, col_gh, col_ga = st.columns(4)
-    sim_h = col_h.selectbox("Gospodarz", list(team_weights.keys()), key="sh")
-    sim_a = col_a.selectbox("Gość", list(team_weights.keys()), key="sa")
-    r_gh = col_gh.number_input("Gole Dom", 0, 10, 2, key="rgh")
-    r_ga = col_ga.number_input("Gole Wyjazd", 0, 10, 1, key="rga")
-
-    if st.button("🔄 Aktualizuj Wagi"):
-        eh, ea = update_team_weights_residual(sim_h, sim_a, r_gh, r_ga)
-        st.success(f"Zaktualizowano wagi! Błąd resztkowy: {eh:+.2f} / {ea:+.2f}")
-        st.rerun()
 
 with tab3:
     st.header("Rejestr Zakładów i ROI")
@@ -242,4 +281,4 @@ with tab3:
         settled = df_b[df_b['status'] != "PENDING"]
         st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
         st.dataframe(df_b, use_container_width=True)
-        
+                
