@@ -50,7 +50,10 @@ DEFAULT_WEIGHTS = {
     "Sporting CP": {"attack": 1.10, "defense": 0.95},
     "Club Brugge": {"attack": 0.95, "defense": 1.10},
     "Celtic": {"attack": 0.90, "defense": 1.15},
-    "Feyenoord": {"attack": 1.00, "defense": 1.05}
+    "Feyenoord": {"attack": 1.00, "defense": 1.05},
+    "AS Roma": {"attack": 1.10, "defense": 0.85},
+    "ŠK Slovan Bratislava": {"attack": 0.85, "defense": 1.20},
+    "AEK Athens": {"attack": 0.95, "defense": 1.10}
 }
 
 # ==========================================
@@ -76,7 +79,6 @@ def calculate_ev(prob, odds):
 
 team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 
-# Uzupełnij ewentualne brakujące kluby w team_weights z DEFAULT_WEIGHTS
 for t_name, t_vals in DEFAULT_WEIGHTS.items():
     if t_name not in team_weights:
         team_weights[t_name] = t_vals
@@ -95,7 +97,8 @@ def normalize_team_name(name):
         "Slavia Prague": "Slavia Praha",
         "Bodo/Glimt": "Bodø/Glimt",
         "Bayer Leverkusen": "Leverkusen",
-        "Atlético Madrid": "Atletico Madrid"
+        "Atlético Madrid": "Atletico Madrid",
+        "Slovan Bratislava": "ŠK Slovan Bratislava"
     }
     norm_name = mapping.get(name, name)
     
@@ -320,4 +323,4 @@ with tab3:
         settled = df_b[df_b['status'] != "PENDING"]
         st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
         st.dataframe(df_b, use_container_width=True)
-        
+    
