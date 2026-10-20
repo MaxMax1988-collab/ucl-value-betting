@@ -53,7 +53,18 @@ DEFAULT_WEIGHTS = {
     "Feyenoord": {"attack": 1.00, "defense": 1.05},
     "AS Roma": {"attack": 1.10, "defense": 0.85},
     "ŠK Slovan Bratislava": {"attack": 0.85, "defense": 1.20},
-    "AEK Athens": {"attack": 0.95, "defense": 1.10}
+    "AEK Athens": {"attack": 0.95, "defense": 1.10},
+    "VfB Stuttgart": {"attack": 1.10, "defense": 1.00},
+    "Como": {"attack": 0.90, "defense": 1.10},
+    "Manchester United": {"attack": 1.15, "defense": 0.95},
+    "Lille": {"attack": 1.05, "defense": 0.95},
+    "Galatasaray": {"attack": 1.10, "defense": 1.00},
+    "Aston Villa": {"attack": 1.15, "defense": 0.90},
+    "Viking FK": {"attack": 0.85, "defense": 1.15},
+    "Inter Milan": {"attack": 1.15, "defense": 0.80},
+    "Shakhtar Donetsk": {"attack": 1.00, "defense": 1.05},
+    "Sporting Lisbon": {"attack": 1.10, "defense": 0.95},
+    "LASK": {"attack": 0.90, "defense": 1.10}
 }
 
 # ==========================================
@@ -323,4 +334,3 @@ with tab3:
         settled = df_b[df_b['status'] != "PENDING"]
         st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
         st.dataframe(df_b, use_container_width=True)
-    
