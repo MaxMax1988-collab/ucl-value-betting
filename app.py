@@ -4,6 +4,8 @@ import numpy as np
 import requests
 import json
 import os
+import re
+from datetime import datetime, timezone
 from scipy.stats import poisson
 
 # ==========================================
@@ -88,16 +90,16 @@ def calculate_ev(prob, odds):
         return 0.0
     return (prob * odds - 1) * 100
 
-team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
+def simplify_string(s):
+    s = re.sub(r'\b(fc|fk|sk|ak)\b', '', s, flags=re.IGNORECASE)
+    return re.sub(r'[^a-zA-Z0-9]', '', s).lower()
 
+team_weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 for t_name, t_vals in DEFAULT_WEIGHTS.items():
     if t_name not in team_weights:
         team_weights[t_name] = t_vals
 save_json_file(WEIGHTS_FILE, team_weights)
 
-# ==========================================
-# NORMALIZACJA NAZW DRUŻYN Z API
-# ==========================================
 def normalize_team_name(name):
     mapping = {
         "Paris Saint Germain": "Paris Saint-Germain",
@@ -112,122 +114,10 @@ def normalize_team_name(name):
         "Slovan Bratislava": "ŠK Slovan Bratislava"
     }
     norm_name = mapping.get(name, name)
-    
     if norm_name not in team_weights:
         team_weights[norm_name] = {"attack": 1.0, "defense": 1.0}
         save_json_file(WEIGHTS_FILE, team_weights)
-        
     return norm_name
-
-# ==========================================
-# API: POBIERANIE KURSÓW
-# ==========================================
-@st.cache_data(ttl=3600)
-def fetch_ucl_odds(api_key):
-    url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/odds/"
-    params = {'apiKey': api_key, 'regions': 'eu', 'markets': 'h2h', 'dateFormat': 'iso'}
-
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            matches = []
-            for match in data:
-                home_team = normalize_team_name(match.get('home_team'))
-                away_team = normalize_team_name(match.get('away_team'))
-                bookmakers = match.get('bookmakers', [])
-                odds = {'1': None, 'X': None, '2': None}
-                
-                if bookmakers:
-                    h2h_market = next((m for m in bookmakers[0]['markets'] if m['key'] == 'h2h'), None)
-                    if h2h_market:
-                        for outcome in h2h_market['outcomes']:
-                            o_name = normalize_team_name(outcome['name'])
-                            if o_name == home_team:
-                                odds['1'] = outcome['price']
-                            elif o_name == away_team:
-                                odds['2'] = outcome['price']
-                            elif outcome['name'] == 'Draw':
-                                odds['X'] = outcome['price']
-
-                matches.append({
-                    "id": match.get('id'),
-                    "home_team": home_team,
-                    "away_team": away_team,
-                    "commence_time": match.get('commence_time'),
-                    "odds": odds
-                })
-            return matches
-        else:
-            return get_mock_matches()
-    except Exception:
-        return get_mock_matches()
-
-# ==========================================
-# AUTOMATYCZNE ROZLICZANIE ZAKŁADÓW I UCZENIE WAG
-# ==========================================
-def fetch_and_apply_automatic_results(api_key):
-    url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/scores/"
-    params = {'apiKey': api_key, 'daysFrom': 7}
-
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            processed_ids = load_json_file(PROCESSED_MATCHES_FILE, [])
-            bets = load_json_file(BETS_FILE, [])
-            
-            weights_updated = False
-            bets_updated = False
-
-            for match in data:
-                if match.get('completed', False):
-                    home_team = normalize_team_name(match.get('home_team'))
-                    away_team = normalize_team_name(match.get('away_team'))
-                    scores = match.get('scores', [])
-                    
-                    if scores and len(scores) == 2:
-                        home_goals = int(next((s['score'] for s in scores if normalize_team_name(s['name']) == home_team), 0))
-                        away_goals = int(next((s['score'] for s in scores if normalize_team_name(s['name']) == away_team), 0))
-
-                        # 1. Aktualizacja wag (uczenie resztkowe)
-                        if match.get('id') not in processed_ids:
-                            update_team_weights_residual_auto(home_team, away_team, home_goals, away_goals)
-                            processed_ids.append(match.get('id'))
-                            weights_updated = True
-
-                        # 2. Rozliczanie Rejestru Zakładów (Paper Trading)
-                        match_str = f"{home_team} vs {away_team}"
-                        actual_result = "1" if home_goals > away_goals else ("2" if away_goals > home_goals else "X")
-
-                        for bet in bets:
-                            if bet.get("status") == "PENDING" and (bet.get("match") == match_str or match_str in bet.get("match", "")):
-                                if bet.get("pick") == actual_result:
-                                    bet["status"] = "WON"
-                                    bet["profit"] = round(bet["stake"] * (bet["odds"] - 1), 2)
-                                else:
-                                    bet["status"] = "LOST"
-                                    bet["profit"] = -round(bet["stake"], 2)
-                                bets_updated = True
-
-            if weights_updated:
-                save_json_file(PROCESSED_MATCHES_FILE, processed_ids)
-            if bets_updated:
-                save_json_file(BETS_FILE, bets)
-
-    except Exception:
-        pass
-
-def get_mock_matches():
-    return [
-        {
-            "id": "mock_1",
-            "home_team": "Real Madrid",
-            "away_team": "Manchester City",
-            "commence_time": "2026-11-26T20:00:00Z",
-            "odds": {"1": 2.40, "X": 3.50, "2": 2.80}
-        }
-    ]
 
 # ==========================================
 # MODEL POISSONA I UCZENIE RESZTKOWE
@@ -269,7 +159,6 @@ def predict_match(home_team, away_team, home_advantage=1.15, league_avg_goals=1.
 
 def update_team_weights_residual_auto(home_team, away_team, actual_home_goals, actual_away_goals, learning_rate=0.05):
     pred = predict_match(home_team, away_team)
-    
     err_home = actual_home_goals - pred["exp_home_goals"]
     err_away = actual_away_goals - pred["exp_away_goals"]
 
@@ -280,31 +169,167 @@ def update_team_weights_residual_auto(home_team, away_team, actual_home_goals, a
 
     team_weights[home_team]["attack"] = round(np.clip(team_weights[home_team]["attack"] + learning_rate * err_home, 0.5, 2.5), 3)
     team_weights[away_team]["defense"] = round(np.clip(team_weights[away_team]["defense"] + learning_rate * err_home, 0.5, 2.5), 3)
-
     team_weights[away_team]["attack"] = round(np.clip(team_weights[away_team]["attack"] + learning_rate * err_away, 0.5, 2.5), 3)
     team_weights[home_team]["defense"] = round(np.clip(team_weights[home_team]["defense"] + learning_rate * err_away, 0.5, 2.5), 3)
 
     save_json_file(WEIGHTS_FILE, team_weights)
 
-# Wywołanie automatycznej weryfikacji i rozliczania przy starcie
+# ==========================================
+# API: POBIERANJE KURSÓW ORAZ AUTONOMOIDALNE BOTOWANIE
+# ==========================================
+@st.cache_data(ttl=1800)
+def fetch_ucl_odds_and_auto_bet(api_key):
+    url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/odds/"
+    params = {'apiKey': api_key, 'regions': 'eu', 'markets': 'h2h', 'dateFormat': 'iso'}
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            matches = []
+            bets = load_json_file(BETS_FILE, [])
+            bets_changed = False
+
+            for match in data:
+                home_team = normalize_team_name(match.get('home_team'))
+                away_team = normalize_team_name(match.get('away_team'))
+                commence_time = match.get('commence_time')
+                
+                bookmakers = match.get('bookmakers', [])
+                odds = {'1': None, 'X': None, '2': None}
+                
+                if bookmakers:
+                    h2h_market = next((m for m in bookmakers[0]['markets'] if m['key'] == 'h2h'), None)
+                    if h2h_market:
+                        for outcome in h2h_market['outcomes']:
+                            o_name = normalize_team_name(outcome['name'])
+                            if o_name == home_team:
+                                odds['1'] = outcome['price']
+                            elif o_name == away_team:
+                                odds['2'] = outcome['price']
+                            elif outcome['name'] == 'Draw':
+                                odds['X'] = outcome['price']
+
+                # Oblicz prognozę
+                pred = predict_match(home_team, away_team)
+                
+                # Sprawdź Value (EV) dla każdego rynku w zdrowych granicach (EV: 5% do 25%, kursy: 1.80 do 3.50)
+                market_evals = [
+                    ("1", odds.get('1'), pred['prob_home']),
+                    ("X", odds.get('X'), pred['prob_draw']),
+                    ("2", odds.get('2'), pred['prob_away'])
+                ]
+
+                match_str = f"{home_team} vs {away_team}"
+
+                for pick_type, odd_val, prob in market_evals:
+                    if odd_val and 1.80 <= odd_val <= 3.50:
+                        ev = calculate_ev(prob, odd_val)
+                        if 5.0 <= ev <= 25.0: # Zdrowe value
+                            # Sprawdź czy ten zakład już istnieje w rejestrze
+                            exists = any(b.get("match") == match_str and b.get("pick") == pick_type for b in bets)
+                            if not exists:
+                                bets.append({
+                                    "match": match_str,
+                                    "pick": pick_type,
+                                    "odds": odd_val,
+                                    "stake": 100.0,
+                                    "status": "PENDING",
+                                    "profit": 0.0
+                                })
+                                bets_changed = True
+
+                matches.append({
+                    "id": match.get('id'),
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "commence_time": commence_time,
+                    "odds": odds,
+                    "pred": pred
+                })
+
+            if bets_changed:
+                save_json_file(BETS_FILE, bets)
+
+            return matches
+        else:
+            return []
+    except Exception:
+        return []
+
+def fetch_and_apply_automatic_results(api_key):
+    url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/scores/"
+    params = {'apiKey': api_key, 'daysFrom': 7}
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            processed_ids = load_json_file(PROCESSED_MATCHES_FILE, [])
+            bets = load_json_file(BETS_FILE, [])
+            
+            weights_updated = False
+            bets_updated = False
+
+            for match in data:
+                if match.get('completed', False):
+                    home_team = normalize_team_name(match.get('home_team'))
+                    away_team = normalize_team_name(match.get('away_team'))
+                    scores = match.get('scores', [])
+                    
+                    if scores and len(scores) == 2:
+                        home_goals = int(next((s['score'] for s in scores if normalize_team_name(s['name']) == home_team), 0))
+                        away_goals = int(next((s['score'] for s in scores if normalize_team_name(s['name']) == away_team), 0))
+
+                        if match.get('id') not in processed_ids:
+                            update_team_weights_residual_auto(home_team, away_team, home_goals, away_goals)
+                            processed_ids.append(match.get('id'))
+                            weights_updated = True
+
+                        actual_result = "1" if home_goals > away_goals else ("2" if away_goals > home_goals else "X")
+                        simp_home = simplify_string(home_team)
+                        simp_away = simplify_string(away_team)
+
+                        for bet in bets:
+                            if bet.get("status") == "PENDING":
+                                bet_match_simp = simplify_string(bet.get("match", ""))
+                                if simp_home in bet_match_simp and simp_away in bet_match_simp:
+                                    if bet.get("pick") == actual_result:
+                                        bet["status"] = "WON"
+                                        bet["profit"] = round(bet["stake"] * (bet["odds"] - 1), 2)
+                                    else:
+                                        bet["status"] = "LOST"
+                                        bet["profit"] = -round(bet["stake"], 2)
+                                    bets_updated = True
+
+            if weights_updated:
+                save_json_file(PROCESSED_MATCHES_FILE, processed_ids)
+            if bets_updated:
+                save_json_file(BETS_FILE, bets)
+    except Exception:
+        pass
+
+# Uruchomienie automatycznego rozliczania wyników przy starcie
 fetch_and_apply_automatic_results(ODDS_API_KEY)
+matches = fetch_ucl_odds_and_auto_bet(ODDS_API_KEY)
 
 # ==========================================
 # INTERFEJS UŻYTKOWNIKA STREAMLIT
 # ==========================================
-st.title("⚽ UCL Match Predictor & Value Betting Hub")
-tab1, tab2, tab3 = st.tabs(["📅 Terminarz & Typy", "📊 Tabela & Statystyki Wag", "📝 Rejestr Zakładów & ROI"])
+st.title("⚽ Autonomiczny UCL Value Bot")
+tab1, tab2, tab3 = st.tabs(["📅 Nadchodzące Mecze & AI", "📊 Tabela & Statystyki Wag", "📝 Autonomiczny Rejestr Zakładów & ROI"])
 
 with tab1:
-    st.header("Najbliższe Mecze i Wycena Kursów")
-    matches = fetch_ucl_odds(ODDS_API_KEY)
+    st.header("Analiza i Automatyczne Wstrzykiwanie Value Betów")
+    st.info("🤖 Bot samoczynnie skanuje kursy przedmeczowe, filtruje zdrowy EV (5%-25%) i bezpieczne kursy (1.80-3.50) do rejestru.")
 
     if not matches:
-        st.info("Obecnie brak nadchodzących meczów Ligi Mistrzów w ofercie bukmacherów.")
+        st.warning("Brak aktywnych meczów Ligi Mistrzów lub problem z połączeniem z API.")
     else:
         for match in matches:
             with st.expander(f"⚔️ {match['home_team']} vs {match['away_team']} — {match['commence_time'][:10]}", expanded=True):
-                pred = predict_match(match['home_team'], match['away_team'])
+                pred = match['pred']
+                o_h, o_d, o_a = match['odds'].get('1'), match['odds'].get('X'), match['odds'].get('2')
                 
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -320,41 +345,27 @@ with tab1:
 
                 with col3:
                     st.markdown("**Wartość (EV):**")
-                    o_h, o_d, o_a = match['odds'].get('1'), match['odds'].get('X'), match['odds'].get('2')
-                    ev_h, ev_d, ev_a = calculate_ev(pred['prob_home'], o_h), calculate_ev(pred['prob_draw'], o_d), calculate_ev(pred['prob_away'], o_a)
-                    st.write(f"1: {o_h or '-'} | EV: **{ev_h:+.1f}%** {'🔥' if ev_h > 5 else ''}")
-                    st.write(f"X: {o_d or '-'} | EV: **{ev_d:+.1f}%** {'🔥' if ev_d > 5 else ''}")
-                    st.write(f"2: {o_a or '-'} | EV: **{ev_a:+.1f}%** {'🔥' if ev_a > 5 else ''}")
-
-                st.divider()
-                c1, c2, c3, _ = st.columns([2, 2, 2, 2])
-                pick = c1.selectbox("Typuj:", ["1", "X", "2"], key=f"pick_{match['id']}")
-                stake = c2.number_input("Stawka (PLN):", min_value=10, max_value=1000, value=100, key=f"stake_{match['id']}")
-                odds_val = o_h if pick == "1" else (o_d if pick == "X" else o_a)
-                
-                if c3.button("➕ Dodaj do Rejestru", key=f"add_{match['id']}"):
-                    history = load_json_file(BETS_FILE, [])
-                    history.append({
-                        "match": f"{match['home_team']} vs {match['away_team']}",
-                        "pick": pick, "odds": odds_val or 2.0, "stake": stake,
-                        "status": "PENDING", "profit": 0.0
-                    })
-                    save_json_file(BETS_FILE, history)
-                    st.success("Dodano zakład!")
+                    ev_h = calculate_ev(pred['prob_home'], o_h)
+                    ev_d = calculate_ev(pred['prob_draw'], o_d)
+                    ev_a = calculate_ev(pred['prob_away'], o_a)
+                    
+                    st.write(f"1: {o_h or '-'} | EV: **{ev_h:+.1f}%** {'🔥' if 5 <= ev_h <= 25 else ''}")
+                    st.write(f"X: {o_d or '-'} | EV: **{ev_d:+.1f}%** {'🔥' if 5 <= ev_d <= 25 else ''}")
+                    st.write(f"2: {o_a or '-'} | EV: **{ev_a:+.1f}%** {'🔥' if 5 <= ev_a <= 25 else ''}")
 
 with tab2:
     st.header("Aktualna Siła Drużyn (Wagi)")
-    st.info("ℹ️ Wagi ataku i obrony aktualizują się automatycznie w tle po każdym zakończonym meczu z API.")
+    st.info("ℹ️ Parametry ataku i obrony modyfikowane automatycznie przez uczenie resztkowe z wyników spotkań.")
     
     df_w = pd.DataFrame.from_dict(team_weights, orient='index').reset_index()
     df_w.columns = ["Drużyna", "Współczynnik Ataku", "Współczynnik Obrony (niżej = lepiej)"]
     st.dataframe(df_w, use_container_width=True)
 
 with tab3:
-    st.header("Rejestr Zakładów i ROI")
+    st.header("Rejestr Automatycznych Zakładów i ROI")
     bets = load_json_file(BETS_FILE, [])
     if not bets:
-        st.info("Brak zapisanych zakładów.")
+        st.info("Brak automatycznie dodanych zakładów spełniających kryteria zdrowego value.")
     else:
         df_b = pd.DataFrame(bets)
         settled = df_b[df_b['status'] != "PENDING"]
