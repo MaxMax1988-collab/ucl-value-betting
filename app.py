@@ -120,7 +120,7 @@ def normalize_team_name(name):
     return norm_name
 
 # ==========================================
-# API: POBIERANIE KURSÓW ORAZ WYNIKÓW
+# API: POBIERANIE KURSÓW
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_ucl_odds(api_key):
@@ -163,19 +163,25 @@ def fetch_ucl_odds(api_key):
     except Exception:
         return get_mock_matches()
 
+# ==========================================
+# AUTOMATYCZNE ROZLICZANIE ZAKŁADÓW I UCZENIE WAG
+# ==========================================
 def fetch_and_apply_automatic_results(api_key):
     url = "https://api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/scores/"
-    params = {'apiKey': api_key, 'daysFrom': 3}
+    params = {'apiKey': api_key, 'daysFrom': 7}
 
     try:
         response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
             data = response.json()
             processed_ids = load_json_file(PROCESSED_MATCHES_FILE, [])
-            updated = False
+            bets = load_json_file(BETS_FILE, [])
+            
+            weights_updated = False
+            bets_updated = False
 
             for match in data:
-                if match.get('completed', False) and match.get('id') not in processed_ids:
+                if match.get('completed', False):
                     home_team = normalize_team_name(match.get('home_team'))
                     away_team = normalize_team_name(match.get('away_team'))
                     scores = match.get('scores', [])
@@ -184,12 +190,31 @@ def fetch_and_apply_automatic_results(api_key):
                         home_goals = int(next((s['score'] for s in scores if normalize_team_name(s['name']) == home_team), 0))
                         away_goals = int(next((s['score'] for s in scores if normalize_team_name(s['name']) == away_team), 0))
 
-                        update_team_weights_residual_auto(home_team, away_team, home_goals, away_goals)
-                        processed_ids.append(match.get('id'))
-                        updated = True
+                        # 1. Aktualizacja wag (uczenie resztkowe)
+                        if match.get('id') not in processed_ids:
+                            update_team_weights_residual_auto(home_team, away_team, home_goals, away_goals)
+                            processed_ids.append(match.get('id'))
+                            weights_updated = True
 
-            if updated:
+                        # 2. Rozliczanie Rejestru Zakładów (Paper Trading)
+                        match_str = f"{home_team} vs {away_team}"
+                        actual_result = "1" if home_goals > away_goals else ("2" if away_goals > home_goals else "X")
+
+                        for bet in bets:
+                            if bet.get("status") == "PENDING" and (bet.get("match") == match_str or match_str in bet.get("match", "")):
+                                if bet.get("pick") == actual_result:
+                                    bet["status"] = "WON"
+                                    bet["profit"] = round(bet["stake"] * (bet["odds"] - 1), 2)
+                                else:
+                                    bet["status"] = "LOST"
+                                    bet["profit"] = -round(bet["stake"], 2)
+                                bets_updated = True
+
+            if weights_updated:
                 save_json_file(PROCESSED_MATCHES_FILE, processed_ids)
+            if bets_updated:
+                save_json_file(BETS_FILE, bets)
+
     except Exception:
         pass
 
@@ -261,6 +286,7 @@ def update_team_weights_residual_auto(home_team, away_team, actual_home_goals, a
 
     save_json_file(WEIGHTS_FILE, team_weights)
 
+# Wywołanie automatycznej weryfikacji i rozliczania przy starcie
 fetch_and_apply_automatic_results(ODDS_API_KEY)
 
 # ==========================================
@@ -318,7 +344,7 @@ with tab1:
 
 with tab2:
     st.header("Aktualna Siła Drużyn (Wagi)")
-    st.info("ℹ️ Wagi ataku i obrony aktualizują się automatycznie w tle. Nowe drużyny z terminarza dopisują się do tabeli samoczynnie.")
+    st.info("ℹ️ Wagi ataku i obrony aktualizują się automatycznie w tle po każdym zakończonym meczu z API.")
     
     df_w = pd.DataFrame.from_dict(team_weights, orient='index').reset_index()
     df_w.columns = ["Drużyna", "Współczynnik Ataku", "Współczynnik Obrony (niżej = lepiej)"]
@@ -332,5 +358,10 @@ with tab3:
     else:
         df_b = pd.DataFrame(bets)
         settled = df_b[df_b['status'] != "PENDING"]
-        st.metric("ROI", f"{(settled['profit'].sum() / settled['stake'].sum() * 100) if not settled.empty and settled['stake'].sum() > 0 else 0.0:+.2f}%")
+        
+        total_stake = settled['stake'].sum() if not settled.empty else 0
+        total_profit = settled['profit'].sum() if not settled.empty else 0
+        roi_val = (total_profit / total_stake * 100) if total_stake > 0 else 0.0
+
+        st.metric("ROI", f"{roi_val:+.2f}%", delta=f"{total_profit:+.2f} PLN")
         st.dataframe(df_b, use_container_width=True)
